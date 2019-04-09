@@ -199,7 +199,7 @@ def doPhotometry(imglist, xpos, ypos, aprad, skybuff, skywidth,timekey='MJD-OBS'
     
 
     #plot apertures
-    plt.figure(figsize=(12,12))
+    plt.figure(figsize=(10,10))
     interval = ZScaleInterval()
     vmin, vmax = interval.get_limits(fits.getdata(imglist[0]))
     plt.imshow(fits.getdata(imglist[0]), vmin=vmin,vmax=vmax, origin='lower')
@@ -280,14 +280,11 @@ def doPhotometryError(imglist,xpos, ypos,aprad, skybuff, skywidth, flux0, GAIN=1
     #make apertures
     apertures, annulus_apertures = makeApertures(xpos, ypos, aprad, skybuff, skywidth)
     
-    
     #find areas of apertures and annuli
     area_of_ap = apertureArea(apertures)    
-
     area_of_background = backgroundArea(annulus_apertures)
 
     checknum = np.linspace(0,nimages,10).astype(int)
-
 
     #find error in photometry
     ePhotometry = np.zeros((nimages,nstars))
@@ -308,81 +305,66 @@ def doPhotometryError(imglist,xpos, ypos,aprad, skybuff, skywidth, flux0, GAIN=1
             err1 = skyvar*(area_of_ap)**2./(np.shape(im[0])[0]*np.shape(im[1])[0])  # uncertainty in mean sky brightness
     
         err2 = area_of_ap * skyvar  # scatter in sky values
-
         err3 = flux0[ind]/GAIN # Poisson error
-    
         print ('Scatter in sky values: ',err2**0.5,', uncertainty in mean sky brightness: ',err1**0.5)
-    
+        
         # sum souces of error in quadrature
         errtot = (err1 + err2 + err3)**0.5
-        
         #append to list
         ePhotometry[ind,:] = errtot
         
     return ePhotometry  
 
 
-def mask(Photometry, ePhotometry, sn_thresh=3.):
-
-    Photometry_mask1 = ma.masked_where(Photometry <= 0, Photometry)
-
-    sn = Photometry_mask1 / ePhotometry
-    Photometry_mask2 = ma.masked_where(sn < sn_thresh, Photometry_mask1)
-    
-    ePhotometry_mask1 = ma.masked_where(Photometry <= 0, ePhotometry)
-
-    sn = Photometry_mask1 / ePhotometry
-    ePhotometry_mask2 = ma.masked_where(sn < sn_thresh, ePhotometry_mask1)
-    
-    return Photometry_mask2, ePhotometry_mask2
-
-
 # detrend all stars
 def detrend(idx, Photometry_initial, ePhotometry, nstars, sn_thresh):
     '''
-    detrend
-    
-    detrend the background for each night so we don't have to worry about changes in background noise levels
+    detrend the background for each night to find least variable comparison stars
     
     inputs
     -------
-    photometry: list - list of flux values from aperture photometry
-    ephotometry: list - list of flux errors from aperture photometry
-    nstars: float - number of stars in the field
+    idx                 :   list - list of indices of target stars
+    Photometry_initial  :   list - list of flux values from aperture photometry
+    ePhotometry         :   list - list of flux errors from aperture photometry
+    nstars              :   float - number of stars in the field
+    sn_thresh           :   float - S/N threshold of what is considered a star or not (good value to use: 3)
     
     outputs
     --------
-    finalPhot: list - final aperture photometry of sources with bad sources replaced with nans.  
-                        << this is the list you want to use from now on. >> 
-    cPhotometry: list - detrended aperture photometry
+    Photometry_fin_mask :   list - final aperture photometry of sources with bad sources masked out  
+    cPhotometry_mask    :   list - detrended aperture photometry with bad sources masked out
     
     '''
+    #determine S/N of all sources
     sn = Photometry_initial / ePhotometry
     
+    #mask out bad photometry: photometry < 0, S/N is less than threshold
     Photometry_mask1 = ma.masked_where(Photometry_initial <= 0, Photometry_initial)
     Photometry_mask2 = ma.masked_where(sn < sn_thresh, Photometry_mask1)
     #mask out target stars
     m = np.zeros_like(Photometry_mask2)
     m[:,idx] = 1
-    Photometry_initial_mask3 = ma.masked_array(Photometry_mask2, m)
+    Photometry_fin_mask = ma.masked_array(Photometry_mask2, m)
        
-    med_val = np.median(Photometry_initial_mask3, axis=0)
+    #find median of all photometry
+    med_val = np.median(Photometry_fin_mask, axis=0)
     
-    c = np.zeros_like(Photometry_initial_mask3)
+    #mask out photometry where the median value is < 0
+    c = np.zeros_like(Photometry_fin_mask)
     c[:,med_val<=0] = 1
 
     # get median flux value for each star (find percent change)
-    cPhotometry = ma.masked_array(Photometry_initial_mask3, c)
+    cPhotometry = ma.masked_array(Photometry_fin_mask, c)
     cPhotometry = cPhotometry / med_val
 
     # do a check for outlier photometry?
     for night in np.arange(len(cPhotometry)):
         # remove large-scale image-to-image variation to find best stars
-        cPhotometry[night] = cPhotometry[night] / ma.median(cPhotometry[night])
+        cPhotometry[night] = cPhotometry[night] / np.median(cPhotometry[night])
     # eliminate stars with outliers from consideration 
     cPhotometry_mask = ma.masked_where( ((cPhotometry < 0.5) | (cPhotometry > 1.5)), cPhotometry)
     
-    return Photometry_initial_mask3, cPhotometry_mask
+    return Photometry_fin_mask, cPhotometry_mask
         
 
 def plotPhotometry(Times,cPhotometry):
@@ -471,7 +453,7 @@ def CaliforniaCoast(Photometry,cPhotometry,comp_num=9,flux_bins=6):
     
 
 
-def findComparisonStars(Photometry, cPhotometry, accuracy_threshold = 0.2, plot=True,comp_num=6): #0.025
+def findComparisonStars(Photometry, cPhotometry, plot=True, comp_num=6): #0.025
     '''
     findComparisonStars*
     
@@ -481,12 +463,12 @@ def findComparisonStars(Photometry, cPhotometry, accuracy_threshold = 0.2, plot=
     --------
     Photometry: list - photometric values taken from detrend() function. 
     cPhotometry: list - detrended photometric values from detrend() function
-    accuracy_threshold: float - level of accuracy in fluxes between various nights
     plot: boolean - True/False plot various stars and highlight comparison stars
+    comp_num: float - (default=5)  minimum number of comparison stars to use
 
     outputs
     --------
-    most_accurate: list - list of indices of the locations in Photometry which have the best stars to use as comparisons
+    LeastVariable[best_key]: list - list of indices of the locations in Photometry which have the best stars to use as comparisons
     '''
 
     BinStars,LeastVariable = CaliforniaCoast(Photometry,cPhotometry,comp_num=comp_num)
@@ -516,13 +498,11 @@ def findComparisonStars(Photometry, cPhotometry, accuracy_threshold = 0.2, plot=
     # but now let's select the brightest one
     best_key = np.array(list(LeastVariable.keys()))[-1]
     
+    print('Number of good & bright comparison stars: {}'.format(len(LeastVariable[best_key])))
     return LeastVariable[best_key]
 
 
-def runDifferentialPhotometry(photometry, ephotometry, nstars, most_accurate, sn_thresh):
-    
-    
-
+def runDifferentialPhotometry(photometry, ephotometry, nstars, most_accurate):
     '''
     runDifferentialPhotometry
     
@@ -543,6 +523,7 @@ def runDifferentialPhotometry(photometry, ephotometry, nstars, most_accurate, sn
     
     '''
     
+    #mask bad photometry
     Photometry = ma.masked_where(photometry <= 0, photometry)
     ePhotometry = ma.masked_where(photometry <= 0, ephotometry)
     
@@ -592,6 +573,7 @@ def runDifferentialPhotometry(photometry, ephotometry, nstars, most_accurate, sn
 
 
 def target_list(memberlist, ra_all, dec_all):
+    ''' finds the index, ra, dec of target star(s) from another catalogue (e.g. DAOstarfinder) either from inputted tuple or region file. '''
     #checks to see if memberlist is a tuple or region file
     if isinstance(memberlist, tuple):
         ra_mem = [memberlist[0]]
@@ -613,7 +595,8 @@ def target_list(memberlist, ra_all, dec_all):
     c = SkyCoord(ra=ra_mem*u.degree, dec=dec_mem*u.degree)  
     catalog = SkyCoord(ra=ra_all*u.degree, dec=dec_all*u.degree)  
     
-    max_sep = 5.0 * u.arcsec 
+    #finds matches within 20" of the target
+    max_sep = 20.0 * u.arcsec 
     ind, d2d, d3d = c.match_to_catalog_3d(catalog) 
     sep_constraint = d2d < max_sep 
     
@@ -630,12 +613,15 @@ def diffPhot_IndividualStars(datadir, idx, ra, dec, xpos, ypos, dPhotometry, edP
     
     inputs
     --------
-    memberlist: tuple OR region file 
-         can either be a tuple (<RA>, <DEC>)  or a region file listing ra and dec of sources
-    ra_all, dec_all, xpos, ypos: list - list of ra, dec, x pixel, y pixel positions of all stars in field
+    datadir: string - location to save .npz file
+    idx: list - list of target indices in DAOstarfinder catalogue
+    ra, dec, xpos, ypos: list - list of ra, dec, x pixel, y pixel positions of all stars in field
     dPhotometry, edPhotometry, eedPhotometry, tePhotometry: lists - lists of differential, photometric err, differential photometric error fluxes found with runDifferentialPhotometry() function
     times: list - list of time stamps
     target: string - name of target
+    filt: string - filter name
+    fitsimage: string - filename of .fits image of one image in stack
+    most_accurate: list - list of indices of good comparison stars
     
     outputs
     --------
@@ -648,6 +634,9 @@ def diffPhot_IndividualStars(datadir, idx, ra, dec, xpos, ypos, dPhotometry, edP
     # read ra positions of all stars
     print(data['ra'])
     
+    ra[idx], dec[idx], xpos[idx], ypos[idx]: list - lists of ra, dec, xpos, ypos of target stars
+    time, flux, fluxerr: lists - lists of time, flux, and flux errors for each target stars
+    
     '''
 
     
@@ -658,8 +647,9 @@ def diffPhot_IndividualStars(datadir, idx, ra, dec, xpos, ypos, dPhotometry, edP
     vmin, vmax = interval.get_limits(fits.getdata(fitsimage))
     plt.figure(figsize=(10,10))
     plt.imshow(fits.getdata(fitsimage), vmin=vmin, vmax=vmax)
-    plt.plot(xpos[idx], ypos[idx], 'ro')
-    plt.plot(xpos[most_accurate], ypos[most_accurate], 'kx')
+    plt.plot(xpos[idx], ypos[idx], 'ro', label='target stars')
+    plt.plot(xpos[most_accurate], ypos[most_accurate], 'kx', label='comparison stars')
+    plt.legend()
     plt.title('target stars')
     plt.show()
     
@@ -674,9 +664,6 @@ def diffPhot_IndividualStars(datadir, idx, ra, dec, xpos, ypos, dPhotometry, edP
     tarypos = []
     flux = []
     fluxerr = []
-    foldedphase = []
-    totperiod = []
-    totpower = []
     
     for star in idx:
         dPhot = dPhotometry[:,star]
@@ -687,40 +674,6 @@ def diffPhot_IndividualStars(datadir, idx, ra, dec, xpos, ypos, dPhotometry, edP
         ED = ma.filled(tePhot, fill_value = np.nan)
         TT = time
         
-        #run L-S analysis
-        print('starting L-S analysis on star at: (x,y) = {}'.format(xpos[star], ypos[star]) )
-
-        #determine where the values are good.
-        w = np.where(np.isfinite(TT) & np.isfinite(DD) & np.isfinite(ED))
-        print('Differential flux: ')
-        print(DD[w])
-        
-        #run LombScargle
-        ls = LombScargle(TT[w], DD[w], ED[w])
-
-        #get power and frequency
-        try:
-            frequency, power = ls.autopower()
-            #determine period
-            per = 1./frequency
-
-            #determine best frequency from LombScargle
-            w = np.where( (per > 0.2) & (per< 4.))
-            best_frequency = frequency[w][np.argmax(power[w])]
-
-            #phase folding
-            newtime = TT % (1./best_frequency)
-            phase = newtime - np.round(newtime,0) + 0.5
-            foldedphase.append(phase)
-            totperiod.append(per)
-            totpower.append(power)
-        except:
-            print('L-S failed.  Potentially one 1 night had good photometry.  All phase, power, and period will be nans')
-            foldedphase.append(np.ones_like(DD)*np.nan)
-            totperiod.append(np.array([np.nan]))
-            totpower.append(np.array([np.nan]))
-        print('--------')    
-
         #append all to list
         flux.append(DD)
         fluxerr.append(ED)
@@ -733,18 +686,12 @@ def diffPhot_IndividualStars(datadir, idx, ra, dec, xpos, ypos, dPhotometry, edP
 
     savefile = datadir + 'differentialPhot_field' + target + filt
 
-    #save as npz file.  much easier and saves lists as lists
-    np.savez(savefile, ra =tarra, dec=tardec, xpos=tarxpos, ypos=tarypos, time=time,flux=flux,fluxerr= fluxerr, foldedphase =foldedphase, period=totperiod, power=totpower  )
-    
-    print('finished.  saving catalogue to:', savefile)
-
-    return tarra, tardec, tarxpos, tarypos, time, flux, fluxerr, foldedphase, totperiod, totpower 
 
     #save as npz file.  much easier and saves lists as lists
-#    np.savez(savefile, ra =ra[idx], dec=dec[idx], xpos=xpos[idx], ypos=ypos[idx], time=time,flux=flux,fluxerr= fluxerr)
-#    print('finished.  saving catalogue to:', savefile)
-#
-#    return ra[idx], dec[idx], xpos[idx], ypos[idx], time, flux, fluxerr
-#      
+    np.savez(savefile, ra =ra[idx], dec=dec[idx], xpos=xpos[idx], ypos=ypos[idx], time=time,flux=flux,fluxerr= fluxerr)
+    print('finished.  saving catalogue to:' + savefile+'.npz')
+
+    return ra[idx], dec[idx], xpos[idx], ypos[idx], time, flux, fluxerr
+      
       
 
