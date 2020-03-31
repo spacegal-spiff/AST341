@@ -28,6 +28,7 @@ import pandas as pd
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from astropy.visualization import ZScaleInterval
+from astropy.stats import sigma_clipped_stats
 
 warnings.filterwarnings("ignore")
 
@@ -74,7 +75,7 @@ def construct_astrometry(hdr_wcs):
 
 
 
-def StarFind(imname, FWHM, nsigma):
+def StarFind(imname, FWHM, nsigma, aprad, skywidth, border_scale = 2):
     '''
     StarFind*
     
@@ -111,12 +112,20 @@ def StarFind(imname, FWHM, nsigma):
     xpos = sources['xcentroid']
     ypos = sources['ycentroid']
     
+    # get rid of stars on border which could have NaN photometry
+    diameter = border_scale * (aprad + skywidth) 
+    
+    xmax = np.shape(im)[1]
+    ymax = np.shape(im)[0]
+
+    xpos2 = xpos[(xpos > diameter) & (xpos < (xmax-diameter)) & (ypos > diameter) & (ypos < (ymax -diameter))]
+    ypos2 = ypos[(xpos > diameter) & (xpos < (xmax-diameter)) & (ypos > diameter) & (ypos < (ymax -diameter))]
     
     #number of stars found
-    nstars = len(xpos)
+    nstars = len(xpos2)
     
     print('found ' + str(nstars) + ' stars')
-    return xpos, ypos, nstars
+    return xpos2, ypos2, nstars
 
 
 def makeApertures(xpos, ypos, aprad,skybuff, skywidth):
@@ -188,10 +197,10 @@ def doPhotometry(imglist, xpos, ypos, aprad, skybuff, skywidth,timekey='MJD-OBS'
     print('making apertures')
     #make the apertures around each star
     apertures, annulus_apertures = makeApertures(xpos, ypos, aprad, skybuff, skywidth)
-    
+    annulus_masks = annulus_apertures.to_mask(method='center')
 
     #plot apertures
-    plt.figure(figsize=(12,12))
+    plt.figure(figsize=(6,6))
     interval = ZScaleInterval()
     vmin, vmax = interval.get_limits(fits.getdata(imglist[1]))
     plt.imshow(fits.getdata(imglist[1]), vmin=vmin,vmax=vmax, origin='lower')
@@ -228,15 +237,34 @@ def doPhotometry(imglist, xpos, ypos, aprad, skybuff, skywidth,timekey='MJD-OBS'
         # different. -mp
         Times.append(hdr[timekey])
         
-        #do photometry
-        phot_table = aperture_photometry(data_image, (apertures,annulus_apertures))
+        bkg_median = []
+        for mask in annulus_masks:
+            annulus_data = mask.multiply(data_image)
+            annulus_data_1d = annulus_data[mask.data > 0]
+            _, median_sigclip, _ = sigma_clipped_stats(annulus_data_1d) #default is 3sigma
+            bkg_median.append(median_sigclip)
+        bkg_median = np.array(bkg_median)
+        phot = aperture_photometry(data_image, apertures)
+        flux0 = phot['aperture_sum'] - (bkg_median * apertures.area)
         
-        #determine flux: (aperture flux) - [(area of aperture * annuli flux)/area of background ]
-        flux0 = np.array(phot_table['aperture_sum_0']) -        (area_of_ap/area_of_background)*np.array(phot_table['aperture_sum_1'])
+#        #do photometry
+#        phot_table = aperture_photometry(data_image, (apertures,annulus_apertures))
+#        
+#        #determine flux: (aperture flux) - [(area of aperture * annuli flux)/area of background ]
+#        flux0 = np.array(phot_table['aperture_sum_0']) -        (area_of_ap/area_of_background)*np.array(phot_table['aperture_sum_1'])
+        
+        nan = np.where((np.isnan(flux0)) | (np.isinf(flux0)))
+        if len(nan[0]) > 0:
+            bad_starx = xpos[nan]
+            bad_stary = ypos[nan]
+
+            print(f'image {ind} NaN flux star (x,y): {bad_starx, bad_stary}') 
 
         #append to list 
         Photometry.append(flux0)
-           
+          
+    Photometry = np.array(Photometry)
+    Times = np.array(Times)
     return Times,Photometry
 
 
@@ -311,9 +339,17 @@ def doPhotometryError(imglist,xpos, ypos,aprad, skybuff, skywidth, flux0, GAIN=1
         # sum souces of error in quadrature
         errtot = (err1 + err2 + err3)**0.5
         
+        nan = np.where((np.isnan(errtot)) | (np.isinf(errtot)))
+        if len(nan[0]) > 0:
+            bad_starx = xpos[nan]
+            bad_stary = ypos[nan]
+
+            print(f'image {ind} NaN fluxerr star (x,y): {bad_starx, bad_stary}') 
+        
         #append to list
         ePhotometry.append(errtot)
         
+    ePhotometry = np.array(ePhotometry)
     return ePhotometry  
 
     
@@ -365,6 +401,11 @@ def detrend(photometry, ephotometry, nstars):
   
         #find all low S/N
         low_sn = np.where(SNval < 3.)
+        
+        if len(low_sn[0]) > 0:
+            print(star, ': low S/N, night', low_sn[0])
+        if star == 135:
+            print(low_sn)
         
         # blank out bad photometry
         starPhotometry[low_sn] = np.nan
@@ -746,12 +787,12 @@ def diffPhot_IndividualStars(datadir, memberlist, ra_all, dec_all, xpos, ypos, d
     
     idx = ind[sep_constraint]
     
-    print(ra_mem)
-   
-    print(ra_all[idx])
-    print( dec_mem)
-    print(dec_all[idx])
-    
+#    print(ra_mem)
+#   
+#    print(ra_all[idx])
+#    print( dec_mem)
+#    print(dec_all[idx])
+#    
     
     print('number of target stars:', len(idx))
     print('index of target stars:', idx)
@@ -847,7 +888,7 @@ def diffPhot_IndividualStars(datadir, memberlist, ra_all, dec_all, xpos, ypos, d
     
     #save as npz file.  much easier and saves lists as lists
     #np.savez(savefile, ra = catalog[idx].ra.deg, dec=catalog[idx].dec.deg, xpos=xpos[idx], ypos=ypos[idx], time=time,foldedphase =foldedphase, period=totperiod, flux=flux,fluxerr= fluxerr, power=totpower  )
-    np.savez(savefile, ra = catalog[idx].ra.deg, dec=catalog[idx].dec.deg, xpos=xpos[idx], ypos=ypos[idx], time=time, flux=flux,fluxerr= fluxerr)
+    a = np.savez(savefile, ra = catalog[idx].ra.deg, dec=catalog[idx].dec.deg, xpos=xpos[idx], ypos=ypos[idx], time=time, flux=flux,fluxerr= fluxerr)
 
     
     # return catalog[idx].ra.deg, catalog[idx].dec.deg, xpos[idx], ypos[idx], time, foldedphase, totperiod, flux, fluxerr, totpower 
